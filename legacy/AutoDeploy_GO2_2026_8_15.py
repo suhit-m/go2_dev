@@ -9,7 +9,7 @@ import numpy as np
 import ConfigReader
 import NDIImageSender
 import ObjectManager
-import ArenaManager_WSL.SCOTSDeploy as SCOTSDeploy
+import legacy.SCOTSDeploy_2026_9_5 as SCOTSDeploy_2026_9_5
 
 ENABLE_PROJECTION = False   # Ventuz + NDI
 ENABLE_TRACKING   = True   # Motive + localization server
@@ -25,7 +25,7 @@ manual_control_port = ":1234"
 camera_resolution = (1280, 720)  # 16:9
 
 # rigid body name in Motive for the quadruped
-ROBOT_NAME = SCOTSDeploy.ROBOT_OBJECT_NAME  # "GO2-001"
+ROBOT_NAME = SCOTSDeploy_2026_9_5.ROBOT_OBJECT_NAME  # "GO2-001"
 
 ROBOT_RENDER_ANGLE_OFFSET = 0
 
@@ -103,12 +103,12 @@ def start_ventuz():
 
 def kill_go2_controller():
     """Stop the closed-loop deployment script running inside WSL."""
-    SCOTSDeploy.kill_closed_loop()
+    SCOTSDeploy_2026_9_5.kill_closed_loop()
 
 
 def controller_bdd_path():
     """Where go2_controller.bdd lands after a successful synthesis."""
-    return os.path.join(SCOTSDeploy.SCOTS_WSL_DIR, "go2_controller.bdd")
+    return os.path.join(SCOTSDeploy_2026_9_5.SCOTS_WSL_DIR, "go2_controller.bdd")
 
 
 def controller_exists():
@@ -746,7 +746,7 @@ class AutoDeploy(QMainWindow):  # class for main gui window
                 tracked = get_objects()
             except Exception as e:
                 print("tracked-obstacle merge skipped: " + str(e))
-        return SCOTSDeploy.collect_arena(
+        return SCOTSDeploy_2026_9_5.collect_arena(
             self.object_manager,
             tracked_objects=tracked,
             include_tracked_obstacles=MERGE_TRACKED_OBSTACLES)
@@ -756,14 +756,14 @@ class AutoDeploy(QMainWindow):  # class for main gui window
         targets, obstacles = self.collect_geometry()
         if not targets:
             raise RuntimeError("No Target placed on the arena.")
-        return SCOTSDeploy.build_config_text(targets, obstacles,
+        return SCOTSDeploy_2026_9_5.build_config_text(targets, obstacles,
                                              state_lb=x_lb, state_ub=x_ub), targets, obstacles
 
     def write_config_only(self):
         """Write arena_config.txt without running synthesis."""
         try:
             text, targets, obstacles = self._build_config_text()
-            path = SCOTSDeploy.write_config(text)
+            path = SCOTSDeploy_2026_9_5.write_config(text)
             self.status.showMessage("Wrote %s  (%d target(s), %d obstacle(s))"
                                     % (path, len(targets), len(obstacles)))
         except Exception as e:
@@ -804,7 +804,7 @@ class AutoDeploy(QMainWindow):  # class for main gui window
         global path_tail
         path_tail = []
 
-        self.thread_scots = SCOTSDeploy.SynthesisThread(
+        self.thread_scots = SCOTSDeploy_2026_9_5.SynthesisThread(
             geometry_provider=self.collect_geometry,
             state_lb=x_lb,
             state_ub=x_ub,
@@ -857,7 +857,7 @@ class AutoDeploy(QMainWindow):  # class for main gui window
             self.btn_run.setEnabled(False)
             return
         try:
-            self.controller_proc = SCOTSDeploy.launch_closed_loop()
+            self.controller_proc = SCOTSDeploy_2026_9_5.launch_closed_loop()
         except Exception as e:
             self.status.showMessage("Could not launch closed loop: %s" % e)
             return
