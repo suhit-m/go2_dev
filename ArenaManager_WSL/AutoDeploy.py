@@ -8,7 +8,6 @@ import numpy as np
 
 import util.ConfigReader as ConfigReader
 import ArenaManager_WSL.NDIImageSender as NDIImageSender
-import ArenaManager_WSL.ObjectManager as ObjectManager
 
 import json
 import util.RESTApiClient as RESTApiClient
