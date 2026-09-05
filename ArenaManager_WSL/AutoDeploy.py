@@ -10,6 +10,11 @@ import util.ConfigReader as ConfigReader
 import ArenaManager_WSL.NDIImageSender as NDIImageSender
 import ArenaManager_WSL.ObjectManager as ObjectManager
 
+import json
+import util.RESTApiClient as RESTApiClient
+
+objects_server_url = "http://192.168.1.194:12345/OptiTrackRestServer"
+
 CONFIG_FILE = "robot.cfg"
 config_reader = ConfigReader.ConfigReader(CONFIG_FILE)
 
@@ -17,14 +22,8 @@ CAMERA_RESOLUTION = (1280, 720) # 16:9
 ENABLE_CAMERA = False
 ENABLE_PROJECTION = False
 
-object = None
+object_manager, robot_manager, obstacle_manager, target_manager = dict()
 
-# default_object_sizes = {
-#     # In Meters
-#     "GO2":("0.31", "0.70"), 
-#     "Target":("1", "1"), 
-#     "Obstacle":("3.0", "0.4")
-# }
 
 # Start here!
 if __name__=="__main__":
@@ -77,37 +76,6 @@ def start_localization_server():
 def start_ventuz():
     ventuz = subprocess.Popen("D:/Workspace/NDIRestServer/ventuz/NDIRestServerRecveiver/Presentations/NDIRestServerReceiver.vpr",stdout=subprocess.PIPE,shell=True)
     return ventuz
-
-# pull from the REST server where the Optitrack data is held
-def get_objects():
-    try:
-        return json.loads(requests.get(LOCALIZATION_SERVER_URL).text)
-    except Exception as e:
-        print("unable to retrieve from localization server: "+str(e))
-
-# Intended to be used with parse_objects()
-def parse_dict_values(string):
-    values = string.split(",")
-    if len(values) != 7:
-        print("Warning! There should be 7 values within the following: %s" % string )
-    return values
-
-# Intended to be used with get_objects()
-# returns 3 dicts with elements formatted as such:
-# "name": [id, x, y, 0, 0, w, l] 
-# Only x, y, w, l really matter
-def parse_objects(dict):
-    robots, obstacles, targets = dict()
-    for key in dict:
-        if "GO2" in key:
-            robots[key] = parse_dict_values(dict[key])
-        if "Obstacle" in key:
-            obstacles[key] = parse_dict_values(dict[key])
-        if "Target" in key:
-            targets[key] = parse_dict_values(dict[key])
-    return robots, obstacles, targets
-
-
 
 
 # function to convert a rectangle defined by (x,y) positon, (w,l) size and angle in rad to polygon coordinates
@@ -241,39 +209,104 @@ class CanvasThread(QThread):
             self.changePixmap.emit(pil2pixmap(img))
             ndiImgSender.send_image(img_bytes, SIM_WIDTH, SIM_HEIGHT)
 
-# TODO
-# Separate thread to manage the addition of objects to the ObjectManager
-# Get rid of Object manager, do everything thru objectthread
-# self.canvas_release_event.connect(thread_object.push_to_localization_server)
-# Must call restDELjson when GUI object is deleted
+
+# pull from the REST server where the Optitrack data is held
+# returns a huge dict
+def get_objects():
+    try:
+        return json.loads(requests.get(LOCALIZATION_SERVER_URL).text)
+    except Exception as e:
+        print("unable to retrieve from localization server: "+str(e))
+
+# Intended to be used with parse_objects()
+def string_to_list(string):
+    values = string.split(",")
+    # if len(values) != 7:
+    #     print("Warning! There should be 7 values within the following: %s" % string )
+    return values
+
+
+# Organizes 1 massive dict and returns 3 dicts with elements formatted as such:
+# "name": [id, x, y, 0, 0, w, l] 
+# Only x, y, w, l really matter
+def parse_objects(dict_input):
+    objects_buf, robots_buf, obstacles_buf, targets_buf = dict()
+    for key in dict_input:
+        # For every key, parse the value, which is assumed to be a comma separated string. 
+        # Thus, every key has value list() of size 7.
+        if "GO2" in key:
+            robots_buf[key] = (dict_input[key])
+        if "Obstacle" in key:
+            obstacles_buf[key] = (dict_input[key])
+        if "Target" in key:
+            targets_buf[key] = (dict_input[key])
+
+        objects_buf[key] = (dict_input[key])
+
+    return objects_buf, robots_buf, obstacles_buf, targets_buf
+
+
+
 class ObjectThread(QThread):
-    objects = pyqtSignal(dict)
     
     def __init__(self, parent):
         super.__init__(parent)  
         self.running = True
+        self.object_client = RESTApiClient.RESTApiClient(objects_server_url)
         
 
-    # Right now, assuming the following method runs repeatedly, it publishes any new tracked objects to object manager. 
-    # It does not however, publish it to the rest server
-    
+    # Solely updates managers with REST server values
     def run(self):
-        global objects
         while (self.running):
-            # If left side is true, return get_objects()
-            stale = get_objects() or {}
-            # Add n to the list if it satisfies the predicate, if its a Target/Obstacle 
-            # and not managed by the object_manager.
-            orphans = [n for n in stale
-                        if ("Target" in n or "Obstacle" in n) and n not in self.parent.object_manager.objects]
-            # If non-empty, update the object_manager.objects dict with 'orphan' key:value pair 
-            # (Iterating over a dict iterates over its keys)
-            if orphans:
-                objects.update({n:stale[n] for n in orphans})
-                print("adopted %d orphaned object(s) from a previous session: %s"
-                        % (len(orphans), orphans))
+            objects_buf = get_objects()
+            for key in objects_buf:
+                objects_buf[key] = string_to_list(objects_buf[key])
+            self.update_managers(parse_objects(objects_buf)) 
+            time.sleep(3)
 
-            time.sleep(5)
+    # Publishes key:value to REST server for the first time and updates managers
+    def publish_object(self, key, value):
+        if self.object_client.restPOSTjson({key:value}) == None:
+            raise ValueError("Could not upload to REST server! (POST)")
+        self.update_managers(parse_objects({key:value}))
+        
+    # Updates key:value to REST server and updates managers
+    def update_object(self, key, value):
+        if self.object_client.restPUTjson({key:value}) == None:
+            raise ValueError("Could not upload to REST server! (PUT)")
+        self.update_managers(parse_objects({key:value}))
+
+    # Allows the dicts to be updated with other dicts instead of redefining
+    def update_managers(self, objects_buf, robots_buf, obstacles_buf, targets_buf):
+        global object_manager, robot_manager, obstacle_manager, target_manager
+        for object in objects_buf:
+            object_manager[object] = objects_buf[object]
+
+        for robot in robots_buf:
+            robot_manager[robot] = robots_buf[robot]
+
+        for obstacle in obstacles_buf:
+            obstacle_manager[obstacle] = obstacles_buf[obstacle]
+
+        for target in targets_buf:
+            target_manager[target] = targets_buf[target]
+    # Given a point (x,y), return the objects where (x,y) are in bounds
+    def getObjectsBounding(self, x, y): 
+        global object_manager
+        objects = []
+        for name in object_manager:
+            values = object_manager[name].split(',')
+            xobj = float(values[1])
+            yobj = float(values[2])
+            wobj = 0.1
+            lobj = 0.1
+            xlower = xobj-wobj; xupper = xobj+wobj
+            ylower = yobj-lobj; yupper = yobj+lobj
+            if x>=xlower and x<=xupper and y>=ylower and y<=yupper:
+                objects.append(name)
+        return objects
+
+
 
     
 
@@ -283,6 +316,9 @@ class SynthesisThread(QThread):
         self.running = True
     def run(self):
         while (self.running):
+    def update_config(self):
+        
+
 
 
 
@@ -290,8 +326,6 @@ class SynthesisThread(QThread):
 class AutoDeploy(QMainWindow): 
     def __init__(self):
         super().__init__()
-
-        self.object_manager = None
         self.thread_scots = None
         self.thread_objects = None
 
@@ -436,7 +470,7 @@ class AutoDeploy(QMainWindow):
         self.btn_synth.setEnabled(False)
         #self.run_controller
         self.btn_run = QPushButton("Run Controller", self)
-        self.btn_run.clicked.connect(self.toggle_controller)
+        self.btn_run.clicked.connect(self.run_controller)
         self.btn_run.setFont(self.font)
         self.btn_run.setEnabled(False)
         #Add Buttons to top
@@ -472,6 +506,7 @@ class AutoDeploy(QMainWindow):
         self.canvas.mousePressEvent = self.canvas_press_event
         self.canvas.mouseReleaseEvent = self.canvas_release_event
         self.canvas.mouseMoveEvent = self.canvas_move_event
+        suffix_idx=0
 
 
         
@@ -636,6 +671,8 @@ class AutoDeploy(QMainWindow):
             self.checked_object_type = "None"
 
 
+
+
     # Important! Launches everything else
     def init_environment(self):  # function to start necessay software environments in sequence ~30s
         self.btn_env.setEnabled(False)
@@ -655,11 +692,6 @@ class AutoDeploy(QMainWindow):
         self.localization_server = subprocess.Popen(["cmd.exe", "/c", "start_admin.bat"], cwd="/mnt/d/Workspace/OptiTrackRESTServer")
         QtTest.QTest.qWait(2000)
         self.activateWindow()
-
-        # Referring to ObjectManager.py
-        # Instantiate an ObjectManager
-        self.object_manager = ObjectManager.ObjectManager()
-
         self.thread_objects = ObjectThread(self)
         self.thread_objects.start()
 
@@ -691,6 +723,8 @@ class AutoDeploy(QMainWindow):
 
         self.thread_canvas.changePixmap.connect(self.set_canvas_image)
         self.thread_canvas.start()
+
+        self.thread_scots = SynthesisThread(self)
         
         # True if you can reach the objects
         reachable = get_objects() is not None
@@ -700,73 +734,6 @@ class AutoDeploy(QMainWindow):
         if self.controller_ready:
             msg += "  Existing controller found."
         self.status.showMessage(msg)
-
-    def load_config(self):
-        self.delete_config()
-        path = os.path.expanduser("~/Desktop")
-        config_file = QFileDialog.getOpenFileName(self, "Open Configuration File", path, "JSON Files (*.json)")[0]
-        if config_file:
-            self.object_manager.loadConfig(config_file)
-            self.status.showMessage("Config File Successfully Loaded")
-
-    def save_config(self):
-        path = os.path.expanduser("~/Desktop")
-        save_filename = QFileDialog.getSaveFileName(self, "Save Configuration File", path + "/objects_config.json", "JSON Files (*.json)")[0]
-        if save_filename:
-            objects_string = self.object_manager.getObjectsString()
-            f = open(save_filename, "w")
-            f.write(objects_string)
-            f.close()
-            self.status.showMessage("Config File Saved")
-
-    def undo(self):
-        self.object_manager.undo()
-
-    def delete_target(self):
-        self.object_manager.deleteByType("Target")
-
-    def delete_obstacle(self):
-        self.object_manager.deleteByType("Obstacle")
-
-    def delete_config(self):
-        self.object_manager.deleteAll()
-
-    
-
-    def _build_config_text(self):
-        """Render arena_config.txt from the GUI geometry. Raises on no target."""
-        robots, targets, obstacles = parse_objects(get_objects())
-        if not targets:
-            raise RuntimeError("No Target placed on the arena.")
-        return SCOTSDeploy.build_config_text(targets, obstacles,
-                                             state_lb=X_LB, state_ub=X_UB), targets, obstacles
-
-    def write_config_only(self):
-        """Write arena_config.txt without running synthesis."""
-        try:
-            text, targets, obstacles = self._build_config_text()
-            path = SCOTSDeploy.write_config(text)
-            self.status.showMessage("Wrote %s  (%d target(s), %d obstacle(s))"
-                                    % (path, len(targets), len(obstacles)))
-        except Exception as e:
-            self.status.showMessage("Could not write config: " + str(e))
-
-    def show_config(self):
-        """Preview what would be written, without touching disk."""
-        try:
-            text, _, _ = self._build_config_text()
-        except Exception as e:
-            text = "Could not build config: " + str(e)
-        dlg = QDialog(self)
-        dlg.setWindowTitle("arena_config.txt preview")
-        dlg.resize(600, 500)
-        view = QPlainTextEdit(dlg)
-        view.setReadOnly(True)
-        view.setFont(QFont("Consolas", 10))
-        view.setPlainText(text)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(view)
-        dlg.exec_()
 
     def synthesize_controller(self):
         # Collect geometry -> write config -> make && ./go2_controller.
@@ -819,77 +786,74 @@ class AutoDeploy(QMainWindow):
             self.run_controller()
 
     def run_controller(self):
-        """Launch the closed loop against whatever go2_controller.bdd exists."""
-        if not controller_exists():
-            self.status.showMessage(
-                "No go2_controller.bdd at %s -- synthesize first."
-                % controller_bdd_path())
-            self.btn_run.setEnabled(False)
-            return
-        try:
-            self.controller_proc = SCOTSDeploy.launch_closed_loop()
-        except Exception as e:
-            self.status.showMessage("Could not launch closed loop: %s" % e)
-            return
-        self.btn_run.setText("Stop Controller")
-        self.btn_synth.setEnabled(False)      # do not re-synthesise mid-run
-        self.controller_timer.start()
-        self.status.showMessage("Closed loop running. Press Stop Controller to halt.")
+        
 
-    def stop_controller(self):
-        try:
-            kill_go2_controller()
-        except Exception as e:
-            print("kill failed: %s" % e)
-        if self.controller_proc is not None:
-            try:
-                self.controller_proc.terminate()
-            except Exception:
-                pass
-        self.controller_proc = None
-        self.controller_timer.stop()
-        self.btn_run.setText("Run Controller")
-        self.btn_synth.setEnabled(True)
-        self.status.showMessage("Closed loop stopped.")
+    # def stop_controller(self):
+    #     try:
+    #         kill_go2_controller()
+    #     except Exception as e:
+    #         print("kill failed: %s" % e)
+    #     if self.controller_proc is not None:
+    #         try:
+    #             self.controller_proc.terminate()
+    #         except Exception:
+    #             pass
+    #     self.controller_proc = None
+    #     self.controller_timer.stop()
+    #     self.btn_run.setText("Run Controller")
+    #     self.btn_synth.setEnabled(True)
+    #     self.status.showMessage("Closed loop stopped.")
 
-    def _poll_controller(self):
-        """Reset the button if the loop exited on its own."""
-        if self.controller_proc is not None and self.controller_proc.poll() is not None:
-            code = self.controller_proc.returncode
-            self.controller_proc = None
-            self.controller_timer.stop()
-            self.btn_run.setText("Run Controller")
-            self.btn_synth.setEnabled(True)
-            self.status.showMessage("Closed loop exited (code %s)." % code)
+    # def _poll_controller(self):
+    #     """Reset the button if the loop exited on its own."""
+    #     if self.controller_proc is not None and self.controller_proc.poll() is not None:
+    #         code = self.controller_proc.returncode
+    #         self.controller_proc = None
+    #         self.controller_timer.stop()
+    #         self.btn_run.setText("Run Controller")
+    #         self.btn_synth.setEnabled(True)
+    #         self.status.showMessage("Closed loop exited (code %s)." % code)
 
 
-    def canvas_press_event(self, event):  # get object ready for mouse drag event
-        if self.setup_complete:
+    def canvas_press_event(self, event): # get object ready for mouse drag event
+        global object_manager  
+        if self.setup_complete: #TODO what is setup_complete?
             x = event.pos().x()
             y = event.pos().y()
             [x, y] = canvas_to_world(x, y)
             f1, f2 = world_to_fields(x, y)
-            bounding_objects = self.object_manager.getObjectsBounding(f1, f2)
+
+            # This is where the GUI checks what object the mouse is hovering over
+            bounding_objects = self.thread_objects.getObjectsBounding(f1, f2)
             if len(bounding_objects) == 1 and self.checked_object_type == "None":
                 self.drag_object_name = bounding_objects[0]
 
-    def canvas_release_event(self, event):  # mouse released event on canvas
+    def canvas_release_event(self, event): 
+        global object_manager
+        # mouse released event on canvas
         if self.setup_complete:
             self.drag_object_name = "None"
             if self.view_edit:
                 x = event.pos().x()
                 y = event.pos().y()
                 [x, y] = canvas_to_world(x, y)
+                # assuming they were trying to place an object and they weren't trying to drag an object
                 if self.checked_object_type != "None" and self.drag_object_name == "None":
+                    # If the customization is empty
                     if self.textbox_width.text() == "" or self.textbox_height.text() == "":
+                        # width and height is default
                         width, height = default_object_sizes[self.checked_object_type]
                     else:
                         width = self.textbox_width.text()
                         height = self.textbox_height.text()
+
+
                     f1, f2 = world_to_fields(x, y)
                     values = ["0", str(f1), str(f2), "0", "0", width, height]
                     # This is where the GUI publishes to the localization server
-                    self.object_manager.addObject(self.object_manager.getValidObjectName(self.checked_object_type), ",".join(values))
+
+                    self.thread_object.publish_object(self.checked_object_type+f"_{self.suffix_idx}", values)
+                    self.suffix_idx+=1
                     self.status.showMessage(self.checked_object_type + " placed at x=" + str(x)[:5] + " y=" + str(y)[:5])
                     self.checked_object_type = "None"
                     self.checkbox_target.setChecked(False)
@@ -899,14 +863,17 @@ class AutoDeploy(QMainWindow):
                     self.canvas.setFocus()
         self.drag_object_name = "None"
 
-    def canvas_move_event(self, event):  # mouse move event on canvas for moving object positions
+    def canvas_move_event(self, event): # mouse move event on canvas for moving object positions
+        global object_manager  
         if self.setup_complete:
             if self.drag_object_name != "None" and self.checked_object_type == "None":
                 x = event.pos().x()
                 y = event.pos().y()
                 [x, y] = canvas_to_world(x, y)
                 f1, f2 = world_to_fields(x, y)
-                self.object_manager.updateObjectPosition(self.drag_object_name, f1, f2)
+                values = ["0", str(f1), str(f2), "0", "0", object_manager[self.drag_object_name][5], object_manager[self.drag_object_name][5]]
+                # This is where the GUI updates the localization server
+                self.thread_object.update_object(self.drag_object_name, values)
                 self.status.showMessage(self.drag_object_name + " moved to x=" + str(x)[:5] + " y=" + str(y)[:5])
 
     def _shutdown_thread(self, thread, timeout_ms=3000):
